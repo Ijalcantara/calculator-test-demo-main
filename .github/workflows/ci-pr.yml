@@ -1,0 +1,171 @@
+name: Trigger REST Assured Tests on PR
+
+on:
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+  actions: write
+  pull-requests: write
+  statuses: write
+
+concurrency:
+  group: "pr-ci-${{ github.head_ref || github.ref_name }}"
+  cancel-in-progress: true
+
+jobs:
+  trigger_remote_tests:
+    name: Trigger REST Assured Tests (Remote Repo)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Dispatch tests to REST Assured repo
+        id: dispatch
+        uses: actions/github-script@v7
+        env:
+          TARGET_OWNER: "Ijalcantara"
+          TARGET_REPO: "rest-assured-framework"
+          TEST_BASE_URL: "https://ijalcantara.github.io/calculator-test-demo-main/"
+        with:
+          github-token: ${{ secrets.CICD_TOKEN }}
+          script: |
+            const { TARGET_OWNER, TARGET_REPO, TEST_BASE_URL } = process.env;
+
+            const dispatchedAt = new Date().toISOString();
+
+            const payload = {
+              base_url: TEST_BASE_URL,
+              source_repo: `${context.repo.owner}/${context.repo.repo}`,
+              mode: 'pr',
+              sha: context.sha,
+              ref: context.payload.pull_request?.head?.ref
+            };
+
+            await github.rest.repos.createDispatchEvent({
+              owner: TARGET_OWNER,
+              repo: TARGET_REPO,
+              event_type: 'run-tests',
+              client_payload: payload
+            });
+
+            core.info(`Dispatch sent: ${JSON.stringify(payload)}`);
+            core.setOutput('dispatched_at', dispatchedAt);
+
+      - name: Wait for REST Assured tests to complete
+        id: wait_tests
+        uses: actions/github-script@v7
+        env:
+          TARGET_OWNER: "Ijalcantara"
+          TARGET_REPO: "rest-assured-framework"
+          DISPATCHED_AT: ${{ steps.dispatch.outputs.dispatched_at }}
+        with:
+          github-token: ${{ secrets.CICD_TOKEN }}
+          script: |
+            const { TARGET_OWNER, TARGET_REPO, DISPATCHED_AT } = process.env;
+
+            const workflow_id = 'on-dispatch-tests.yml';
+            const timeout = Date.now() + 20 * 60 * 1000;
+            const dispatchedAtMs = Date.parse(DISPATCHED_AT);
+
+            let runId = null;
+
+            while (Date.now() < timeout) {
+              const runs = await github.rest.actions.listWorkflowRuns({
+                owner: TARGET_OWNER,
+                repo: TARGET_REPO,
+                workflow_id,
+                event: 'repository_dispatch',
+                per_page: 20
+              });
+
+              const match = runs.data.workflow_runs.find(
+                r => Date.parse(r.created_at) >= dispatchedAtMs
+              );
+
+              if (match) {
+                runId = match.id;
+                core.info(`Matched run: ${runId}`);
+                break;
+              }
+
+              await new Promise(r => setTimeout(r, 5000));
+            }
+
+            if (!runId) {
+              core.setFailed('No REST Assured workflow run found.');
+              return;
+            }
+
+            let run;
+
+            while (Date.now() < timeout) {
+              const res = await github.rest.actions.getWorkflowRun({
+                owner: TARGET_OWNER,
+                repo: TARGET_REPO,
+                run_id: runId
+              });
+
+              run = res.data;
+
+              core.info(`status=${run.status}, conclusion=${run.conclusion}`);
+
+              if (run.status === 'completed') break;
+
+              await new Promise(r => setTimeout(r, 10000));
+            }
+
+            core.setOutput('run_url', run.html_url);
+            core.setOutput('conclusion', run.conclusion || 'unknown');
+
+            if (run.conclusion !== 'success') {
+              core.setFailed(`REST Assured tests failed: ${run.conclusion}`);
+            }
+
+      - name: Set commit status
+        if: ${{ always() }}
+        uses: actions/github-script@v7
+        env:
+          RUN_URL: ${{ steps.wait_tests.outputs.run_url }}
+          CONCLUSION: ${{ steps.wait_tests.outputs.conclusion }}
+        with:
+          github-token: ${{ secrets.CICD_TOKEN }}
+          script: |
+            const state = (process.env.CONCLUSION === 'success') ? 'success' : 'failure';
+
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.sha,
+              state,
+              context: 'REST Assured Tests',
+              target_url: process.env.RUN_URL,
+              description: state === 'success' ? 'Tests passed' : 'Tests failed'
+            });
+
+      - name: Comment on PR if tests fail
+        if: ${{ always() && steps.wait_tests.outputs.conclusion != 'success' }}
+        uses: actions/github-script@v7
+        env:
+          RUN_URL: ${{ steps.wait_tests.outputs.run_url }}
+          CONCLUSION: ${{ steps.wait_tests.outputs.conclusion }}
+        with:
+          github-token: ${{ secrets.CICD_TOKEN }}
+          script: |
+            const prNumber = context.payload.pull_request?.number;
+            if (!prNumber) return;
+
+            const body = [
+              "🚨 REST Assured tests failed",
+              "",
+              `Run details: ${process.env.RUN_URL}`,
+              "",
+              `Status: **${process.env.CONCLUSION?.toUpperCase()}**`
+            ].join("\n");
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body
+            });
