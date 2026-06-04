@@ -96,7 +96,7 @@ jobs:
           script: |
             const { TARGET_OWNER, TARGET_REPO, DISPATCHED_AT } = process.env;
 
-            const workflow_id = "on-dispatch-tests.yml";
+            const workflow_id = "api-tests.yaml";
             const timeout = Date.now() + 20 * 60 * 1000;
             const dispatchedAtMs = Date.parse(DISPATCHED_AT);
 
