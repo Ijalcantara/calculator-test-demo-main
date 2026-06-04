@@ -16,12 +16,13 @@ concurrency:
   group: "pages-deploy"
   cancel-in-progress: true
 
-
 jobs:
 
+  # =========================
+  # 1. PACKAGE SITE
+  # =========================
   package_site:
     runs-on: ubuntu-latest
-    name: Package Static Site
 
     steps:
       - uses: actions/checkout@v4
@@ -29,30 +30,32 @@ jobs:
       - name: Debug workspace
         run: ls -R .
 
-      # ✅ FIX: no docs dependency, deploy everything
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: docs
+          path: docs   # IMPORTANT: must contain index.html
 
 
+  # =========================
+  # 2. STAGING DEPLOY
+  # =========================
   deploy_staging:
     needs: package_site
     runs-on: ubuntu-latest
-    name: Deploy to Staging
     environment:
       name: staging
 
     steps:
-      # ✅ DIRECT deploy to GitHub Pages (no extra repo)
       - name: Deploy to GitHub Pages (Staging)
         uses: actions/deploy-pages@v4
 
 
+  # =========================
+  # 3. SMOKE TEST (REST ASSURED)
+  # =========================
   smoke_test_staging:
     needs: deploy_staging
     runs-on: ubuntu-latest
-    name: Run Smoke Tests (Staging)
 
     steps:
       - name: Trigger REST Assured tests
@@ -84,6 +87,9 @@ jobs:
             core.setOutput("dispatched_at", new Date().toISOString());
 
 
+      # =========================
+      # FIXED WAIT LOGIC (NO 404)
+      # =========================
       - name: Wait for smoke tests
         id: wait
         uses: actions/github-script@v7
@@ -96,17 +102,17 @@ jobs:
           script: |
             const { TARGET_OWNER, TARGET_REPO, DISPATCHED_AT } = process.env;
 
-            const workflow_id = "api-tests.yaml";
             const timeout = Date.now() + 20 * 60 * 1000;
             const dispatchedAtMs = Date.parse(DISPATCHED_AT);
 
             let runId = null;
+            let run = null;
 
             while (Date.now() < timeout) {
-              const runs = await github.rest.actions.listWorkflowRuns({
+
+              const runs = await github.rest.actions.listWorkflowRunsForRepo({
                 owner: TARGET_OWNER,
                 repo: TARGET_REPO,
-                workflow_id,
                 event: "repository_dispatch",
                 per_page: 20
               });
@@ -124,11 +130,9 @@ jobs:
             }
 
             if (!runId) {
-              core.setFailed("Smoke test run not found.");
+              core.setFailed("REST Assured run not found");
               return;
             }
-
-            let run;
 
             while (Date.now() < timeout) {
               const res = await github.rest.actions.getWorkflowRun({
@@ -145,21 +149,22 @@ jobs:
             }
 
             core.setOutput("run_url", run.html_url);
-            core.setOutput("conclusion", run.conclusion);
+            core.setOutput("conclusion", run.conclusion || "unknown");
 
             if (run.conclusion !== "success") {
               core.setFailed(`Smoke tests failed: ${run.conclusion}`);
             }
+  
 
-
+  # =========================
+  # 4. PRODUCTION DEPLOY
+  # =========================
   deploy_production:
     needs: [package_site, deploy_staging, smoke_test_staging]
     runs-on: ubuntu-latest
-    name: Deploy to Production
     environment:
       name: production
 
     steps:
       - name: Deploy to GitHub Pages (Production)
         uses: actions/deploy-pages@v4
-
