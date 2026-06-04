@@ -10,6 +10,7 @@ permissions:
   pull-requests: write
   statuses: write
 
+
 concurrency:
   group: "pr-ci-${{ github.head_ref || github.ref_name }}"
   cancel-in-progress: true
