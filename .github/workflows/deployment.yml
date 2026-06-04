@@ -33,7 +33,7 @@ jobs:
       - name: Upload Pages artifact (static site)
         uses: actions/upload-pages-artifact@v3
         with:
-          path: docs  # Use whatever folder appears after build
+          path: .  # Use whatever folder appears after build
 
       # - name: Upload Pages artifact (static site)
       #   uses: actions/upload-pages-artifact@v3
