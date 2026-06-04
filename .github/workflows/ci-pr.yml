@@ -20,6 +20,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # =========================
+      # 1. DISPATCH TESTS
+      # =========================
       - name: Dispatch tests to REST Assured repo
         id: dispatch
         uses: actions/github-script@v7
@@ -52,6 +55,9 @@ jobs:
             core.info(`Dispatch sent: ${JSON.stringify(payload)}`);
             core.setOutput('dispatched_at', dispatchedAt);
 
+      # =========================
+      # 2. WAIT FOR TESTS (FIXED)
+      # =========================
       - name: Wait for REST Assured tests to complete
         id: wait_tests
         uses: actions/github-script@v7
@@ -64,11 +70,31 @@ jobs:
           script: |
             const { TARGET_OWNER, TARGET_REPO, DISPATCHED_AT } = process.env;
 
-            const workflow_id = 'api-tests.yaml';
             const timeout = Date.now() + 20 * 60 * 1000;
             const dispatchedAtMs = Date.parse(DISPATCHED_AT);
 
+            // 🔥 GET WORKFLOW ID FIRST (FIX FOR 404 ISSUE)
+            const workflows = await github.rest.actions.listRepoWorkflows({
+              owner: TARGET_OWNER,
+              repo: TARGET_REPO
+            });
+
+            const workflow = workflows.data.workflows.find(w =>
+              w.name.includes("API Test Automation")
+            );
+
+            if (!workflow) {
+              core.setFailed("REST workflow not found");
+              return;
+            }
+
+            const workflow_id = workflow.id;
+
+            // =========================
+            // FIND RUN
+            // =========================
             let runId = null;
+            let run = null;
 
             while (Date.now() < timeout) {
               const runs = await github.rest.actions.listWorkflowRuns({
@@ -93,12 +119,13 @@ jobs:
             }
 
             if (!runId) {
-              core.setFailed('No REST Assured workflow run found.');
+              core.setFailed("No REST Assured workflow run found.");
               return;
             }
 
-            let run;
-
+            // =========================
+            // WAIT FOR COMPLETION
+            // =========================
             while (Date.now() < timeout) {
               const res = await github.rest.actions.getWorkflowRun({
                 owner: TARGET_OWNER,
@@ -122,6 +149,9 @@ jobs:
               core.setFailed(`REST Assured tests failed: ${run.conclusion}`);
             }
 
+      # =========================
+      # 3. COMMIT STATUS
+      # =========================
       - name: Set commit status
         if: ${{ always() }}
         uses: actions/github-script@v7
@@ -143,6 +173,9 @@ jobs:
               description: state === 'success' ? 'Tests passed' : 'Tests failed'
             });
 
+      # =========================
+      # 4. PR COMMENT (FAILURE)
+      # =========================
       - name: Comment on PR if tests fail
         if: ${{ always() && steps.wait_tests.outputs.conclusion != 'success' }}
         uses: actions/github-script@v7
