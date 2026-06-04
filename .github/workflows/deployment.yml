@@ -1,4 +1,4 @@
-name: Deployment on Staging (automatic) + Production (with approval)
+name: Deployment on Staging + Production (GitHub Pages)
 
 on:
   push:
@@ -16,6 +16,7 @@ concurrency:
   group: "pages-deploy"
   cancel-in-progress: true
 
+
 jobs:
 
   package_site:
@@ -26,19 +27,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Debug workspace
-        run: |
-          echo "=== Workspace Files ==="
-          ls -R .
+        run: ls -R .
 
-      - name: Upload Pages artifact (static site)
+      # ✅ FIX: no docs dependency, deploy everything
+      - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: .  # Use whatever folder appears after build
+          path: .
 
-      # - name: Upload Pages artifact (static site)
-      #   uses: actions/upload-pages-artifact@v3
-      #   with:
-      #     path: src
 
   deploy_staging:
     needs: package_site
@@ -46,162 +42,115 @@ jobs:
     name: Deploy to Staging
     environment:
       name: staging
-      url: https://hudjin05.github.io/calculator-demo-app-staging/
 
     steps:
-      - name: Download Pages artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: github-pages
-          path: site
+      # ✅ DIRECT deploy to GitHub Pages (no extra repo)
+      - name: Deploy to GitHub Pages (Staging)
+        uses: actions/deploy-pages@v4
 
-      - name: Extract artifact
-        run: |
-          set -e
-          tar -xf site/artifact.tar -C site
-          rm site/artifact.tar
-
-      - name: Checkout staging repo (main)
-        uses: actions/checkout@v4
-        with:
-          repository: hudjin05/calculator-demo-app-staging
-          ref: main
-          token: ${{ secrets.CICD_TOKEN }}
-          path: staging
-
-      - name: Sync artifact contents to staging
-        run: |
-          set -e
-          cd staging
-
-          find . -mindepth 1 -maxdepth 1 \
-            ! -name '.git' \
-            ! -name 'README.md' \
-            -exec rm -rf {} +
-
-          cp -R ../site/* .
-
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          if git status --porcelain | grep .; then
-            git add .
-            git commit -m "Deploy staging from ${GITHUB_SHA}"
-            git push origin main
-          else
-            echo "No changes to deploy to staging."
-          fi
 
   smoke_test_staging:
     needs: deploy_staging
     runs-on: ubuntu-latest
-    name: Run Smoke Tests on Staging
+    name: Run Smoke Tests (Staging)
 
     steps:
-      - name: Trigger smoke tests via repository_dispatch (staging URL)
-        id: send_smoke_tests
+      - name: Trigger REST Assured tests
+        id: dispatch
         uses: actions/github-script@v7
         env:
-          TARGET_OWNER: "hudjin05"
-          TARGET_REPO: "Cucumber_Selenium_CICD"
-          STAGING_URL: "https://hudjin05.github.io/calculator-demo-app-staging/"
+          TARGET_OWNER: "Ijalcantara"
+          TARGET_REPO: "rest-assured-framework"
+          STAGING_URL: "https://ijalcantara.github.io/calculator-test-demo-main/"
         with:
           github-token: ${{ secrets.CICD_TOKEN }}
           script: |
             const payload = {
-              calc_url: process.env.STAGING_URL,
-              environment: 'staging',
-              mode: 'staging-smoke',
+              base_url: process.env.STAGING_URL,
+              environment: "staging",
+              mode: "smoke",
               source_repo: `${context.repo.owner}/${context.repo.repo}`,
               sha: context.sha,
-              ref: context.ref.replace('refs/heads/', '')
+              ref: context.ref.replace("refs/heads/", "")
             };
 
             await github.rest.repos.createDispatchEvent({
               owner: process.env.TARGET_OWNER,
               repo: process.env.TARGET_REPO,
-              event_type: 'run-tests',
+              event_type: "run-tests",
               client_payload: payload
             });
 
-            core.info(`Smoke tests dispatched with payload: ${JSON.stringify(payload)}`);
             core.setOutput("dispatched_at", new Date().toISOString());
 
-      - name: Wait for smoke tests to finish
-        id: wait_smoke_tests
+
+      - name: Wait for smoke tests
+        id: wait
         uses: actions/github-script@v7
         env:
-          TARGET_OWNER: "hudjin05"
-          TARGET_REPO: "Cucumber_Selenium_CICD"
-          DISPATCHED_AT: ${{ steps.send_smoke_tests.outputs.dispatched_at }}
+          TARGET_OWNER: "Ijalcantara"
+          TARGET_REPO: "rest-assured-framework"
+          DISPATCHED_AT: ${{ steps.dispatch.outputs.dispatched_at }}
         with:
           github-token: ${{ secrets.CICD_TOKEN }}
           script: |
             const { TARGET_OWNER, TARGET_REPO, DISPATCHED_AT } = process.env;
-            const workflow_id = 'on-dispatch-tests.yml';
-            const deadline = Date.now() + 20 * 60 * 1000;
+
+            const workflow_id = "on-dispatch-tests.yml";
+            const timeout = Date.now() + 20 * 60 * 1000;
             const dispatchedAtMs = Date.parse(DISPATCHED_AT);
 
             let runId = null;
-            let run = null;
 
-            core.info(`Looking for workflow runs in ${TARGET_OWNER}/${TARGET_REPO} after ${DISPATCHED_AT}`);
-            
-            while (Date.now() < deadline) {
+            while (Date.now() < timeout) {
               const runs = await github.rest.actions.listWorkflowRuns({
                 owner: TARGET_OWNER,
                 repo: TARGET_REPO,
                 workflow_id,
-                event: 'repository_dispatch',
+                event: "repository_dispatch",
                 per_page: 20
               });
-            
-            
-              console.log("Recent runs:", runs.data.workflow_runs.map(r => ({
-              id: r.id,
-              created_at: r.created_at,
-              status: r.status,
-              conclusion: r.conclusion
-              })));
 
-              const match = runs.data.workflow_runs.find(r => Date.parse(r.created_at) >= dispatchedAtMs);
+              const match = runs.data.workflow_runs.find(
+                r => Date.parse(r.created_at) >= dispatchedAtMs
+              );
+
               if (match) {
                 runId = match.id;
-                core.info(`Found smoke test run: ${runId}`);
                 break;
               }
+
               await new Promise(r => setTimeout(r, 5000));
             }
 
-            if (!runId) core.setFailed("Smoke test run not found.");
-
             if (!runId) {
-              core.setFailed("Smoke test run not found within the deadline.");
+              core.setFailed("Smoke test run not found.");
               return;
             }
 
-            while (Date.now() < deadline) {
+            let run;
+
+            while (Date.now() < timeout) {
               const res = await github.rest.actions.getWorkflowRun({
                 owner: TARGET_OWNER,
                 repo: TARGET_REPO,
                 run_id: runId
               });
 
-
-
               run = res.data;
-              core.info(`status=${run.status}, conclusion=${run.conclusion}`);
 
-              if (run.status === 'completed') break;
+              if (run.status === "completed") break;
+
               await new Promise(r => setTimeout(r, 10000));
             }
 
-            core.setOutput('run_url', run.html_url);
-            core.setOutput('conclusion', run.conclusion);
+            core.setOutput("run_url", run.html_url);
+            core.setOutput("conclusion", run.conclusion);
 
-            if (run.conclusion !== 'success') {
-              core.setFailed(`Staging smoke tests FAILED: ${run.conclusion}`);
+            if (run.conclusion !== "success") {
+              core.setFailed(`Smoke tests failed: ${run.conclusion}`);
             }
+
 
   deploy_production:
     needs: [package_site, deploy_staging, smoke_test_staging]
@@ -209,7 +158,6 @@ jobs:
     name: Deploy to Production
     environment:
       name: production
-      url: https://hudjin05.github.io/calculator-demo-app
 
     steps:
       - name: Deploy to GitHub Pages (Production)
