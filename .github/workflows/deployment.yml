@@ -63,7 +63,7 @@ jobs:
         uses: actions/github-script@v7
         env:
           TARGET_OWNER: "Ijalcantara"
-          TARGET_REPO: "rest-assured-framework"
+          TARGET_REPO: "final-rest-assured-framework"
           STAGING_URL: "https://ijalcantara.github.io/calculator-test-demo-main/"
         with:
           github-token: ${{ secrets.CICD_TOKEN }}
@@ -96,7 +96,7 @@ jobs:
         uses: actions/github-script@v7
         env:
           TARGET_OWNER: "Ijalcantara"
-          TARGET_REPO: "rest-assured-framework"
+          TARGET_REPO: "final-rest-assured-framework"
           DISPATCHED_AT: ${{ steps.dispatch.outputs.dispatched_at }}
         with:
           github-token: ${{ secrets.CICD_TOKEN }}
